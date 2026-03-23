@@ -1,6 +1,9 @@
 /target/
 ows-canton/target/
 Cargo.lock
+.env
 *.swp
 *.swo
 .DS_Store
+.idea/
+.vscode/
