@@ -7,11 +7,17 @@
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
+use crate::audit::{append_audit_log_in, AuditEntry};
 use crate::keygen::{
     ed25519_sign, ed25519_verify, generate_canton_keypair, CantonSigningAlgorithm,
 };
-use crate::policy::{CantonCommand, CantonCommandType};
+use crate::ledger_api::client::LedgerApiClient;
+use crate::ledger_api::types::{
+    ActiveContract, MultiHashSignatureRequest, SimulateCommandRequest, SubmitCommandRequest,
+};
+use crate::policy::{CantonCommand, CantonCommandType, SimulationResult};
 use crate::wallet::{decrypt_canton_wallet, CantonWalletFile};
 use crate::CantonError;
 
@@ -277,6 +283,146 @@ pub fn verify_canton_signature(
     ed25519_verify(&pubkey, message, &sig_bytes)
 }
 
+// ── Command submission flow ────────────────────────────────────────
+
+/// Submit a signed DAML command to the Canton Ledger API.
+///
+/// Full flow: decrypt wallet → derive keypair → build request →
+/// SHA-256 hash → sign → submit → audit log → return result.
+///
+/// Key material is zeroized automatically via [`Zeroizing`](zeroize::Zeroizing)
+/// and [`CantonKeyPair::drop`](crate::keygen::CantonKeyPair).
+pub async fn canton_submit_command(
+    wallet: &CantonWalletFile,
+    passphrase: &str,
+    command: &CantonCommand,
+    act_as: &[String],
+    read_as: &[String],
+    client: &LedgerApiClient,
+    ows_home: Option<&std::path::Path>,
+) -> Result<CantonSubmitResult, CantonError> {
+    let account = wallet
+        .accounts
+        .first()
+        .ok_or_else(|| CantonError::InvalidWalletFile {
+            reason: "wallet has no accounts".to_string(),
+        })?;
+
+    let fingerprint = account.canton.key_fingerprint.clone();
+    let derivation_path = &account.derivation_path;
+    let algorithm: CantonSigningAlgorithm = serde_json::from_value(serde_json::Value::String(
+        account.canton.signing_algorithm.clone(),
+    ))
+    .map_err(|_| CantonError::UnsupportedAlgorithm {
+        algorithm: account.canton.signing_algorithm.clone(),
+    })?;
+
+    // 1. Decrypt wallet → mnemonic entropy.
+    let entropy = decrypt_canton_wallet(wallet, passphrase)?;
+    let mnemonic =
+        bip39::Mnemonic::from_entropy(&entropy).map_err(|e| CantonError::InvalidMnemonic {
+            reason: e.to_string(),
+        })?;
+    let seed = mnemonic.to_seed("");
+
+    // 2. Derive signing key.
+    let keypair = generate_canton_keypair(&seed, derivation_path, algorithm)?;
+
+    // 3. Build submission request.
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let submission = build_submission_request(command, act_as, read_as, &command_id);
+
+    // 4. Hash the serialized submission → sign.
+    let payload_bytes = serde_json::to_vec(&submission)?;
+    let payload_hash = Sha256::digest(&payload_bytes);
+    let sig_bytes = ed25519_sign(&keypair.private_key, &payload_hash)?;
+
+    // 5. Build signature request for the API.
+    let sig_request = MultiHashSignatureRequest {
+        format: SIGNATURE_FORMAT_CONCAT.to_string(),
+        signature: base64::engine::general_purpose::STANDARD.encode(&sig_bytes),
+        signed_by: fingerprint.clone(),
+        signing_algorithm_spec: algorithm.to_string(),
+    };
+
+    // keypair, entropy, seed are all dropped here → zeroized.
+
+    // 6. Submit to Ledger API.
+    let submit_req = SubmitCommandRequest {
+        commands: submission,
+        multi_hash_signatures: vec![sig_request],
+    };
+    let resp = client.submit_command(&submit_req).await?;
+
+    // 7. Build result.
+    let result = CantonSubmitResult {
+        command_id: command_id.clone(),
+        status: if resp.transaction_id.is_some() {
+            CantonCommandStatus::Succeeded
+        } else {
+            CantonCommandStatus::Failed {
+                reason: "no transaction_id in response".to_string(),
+            }
+        },
+        completion_offset: resp.completion_offset,
+        transaction_id: resp.transaction_id,
+    };
+
+    // 8. Audit log.
+    if let Some(home) = ows_home {
+        let _ = append_audit_log_in(
+            home,
+            &AuditEntry::new(
+                &wallet.id,
+                "canton_submit_command",
+                &account.chain_id,
+                serde_json::json!({
+                    "template_id": &command.template_id,
+                    "choice": &command.choice,
+                    "command_id": &command_id,
+                    "act_as": act_as,
+                    "status": serde_json::to_value(&result.status).unwrap_or_default(),
+                }),
+            ),
+        );
+    }
+
+    Ok(result)
+}
+
+/// Simulate a DAML command without signing or committing.
+///
+/// No key decryption is needed — the command is sent directly to the
+/// Ledger API simulation endpoint.
+pub async fn canton_simulate(
+    command: &CantonCommand,
+    act_as: &[String],
+    read_as: &[String],
+    client: &LedgerApiClient,
+) -> Result<SimulationResult, CantonError> {
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let submission = build_submission_request(command, act_as, read_as, &command_id);
+
+    let req = SimulateCommandRequest {
+        commands: submission,
+    };
+    let resp = client.simulate_command(&req).await?;
+
+    Ok(SimulationResult {
+        success: resp.success,
+        error_message: resp.error_message,
+    })
+}
+
+/// Query active contracts from the Ledger API.
+pub async fn canton_query_contracts(
+    template_id: &str,
+    parties: &[String],
+    client: &LedgerApiClient,
+) -> Result<Vec<ActiveContract>, CantonError> {
+    client.get_active_contracts(template_id, parties).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +685,262 @@ mod tests {
         assert_eq!(json["format"], "SIGNATURE_FORMAT_CONCAT");
         let roundtrip: CantonSignature = serde_json::from_value(json).unwrap();
         assert_eq!(roundtrip.signed_by, sig.signed_by);
+    }
+
+    // ── Async command submission tests ─────────────────────────────
+
+    mod submit_tests {
+        use super::*;
+        use crate::audit::read_audit_log_in;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        async fn make_test_wallet_and_dir() -> (tempfile::TempDir, CantonWalletFile) {
+            let tmpdir = tempfile::tempdir().unwrap();
+            let chain_id = CantonChainId::parse(CantonChainId::SANDBOX).unwrap();
+            let wallet = create_canton_wallet_in(
+                tmpdir.path(),
+                "submit-test",
+                PASSPHRASE,
+                &chain_id,
+                "http://localhost:7575",
+                CantonSigningAlgorithm::Ed25519,
+            )
+            .unwrap();
+            (tmpdir, wallet)
+        }
+
+        fn test_command() -> CantonCommand {
+            CantonCommand {
+                template_id: "Daml.Finance.Holding:Fungible".to_string(),
+                command_type: CantonCommandType::Exercise,
+                choice: Some("Transfer".to_string()),
+                contract_id: Some("00abcdef".to_string()),
+                arguments: serde_json::json!({"newOwner": "bob"}),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_submit_command_success() {
+            let mock = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v2/commands/submit"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "commandId": "cmd-001",
+                    "completionOffset": "42",
+                    "transactionId": "tx-abc"
+                })))
+                .mount(&mock)
+                .await;
+
+            let (tmpdir, wallet) = make_test_wallet_and_dir().await;
+            let client = LedgerApiClient::new(&mock.uri(), None);
+
+            let result = canton_submit_command(
+                &wallet,
+                PASSPHRASE,
+                &test_command(),
+                &["alice::1220abcd".to_string()],
+                &[],
+                &client,
+                Some(tmpdir.path()),
+            )
+            .await
+            .unwrap();
+
+            assert!(!result.command_id.is_empty());
+            assert!(matches!(result.status, CantonCommandStatus::Succeeded));
+            assert_eq!(result.transaction_id.as_deref(), Some("tx-abc"));
+            assert_eq!(result.completion_offset.as_deref(), Some("42"));
+        }
+
+        #[tokio::test]
+        async fn test_submit_command_failure() {
+            let mock = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v2/commands/submit"))
+                .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+                .mount(&mock)
+                .await;
+
+            let (tmpdir, wallet) = make_test_wallet_and_dir().await;
+            let client = LedgerApiClient::new(&mock.uri(), None);
+
+            let err = canton_submit_command(
+                &wallet,
+                PASSPHRASE,
+                &test_command(),
+                &["alice::1220abcd".to_string()],
+                &[],
+                &client,
+                Some(tmpdir.path()),
+            )
+            .await
+            .unwrap_err();
+
+            assert!(matches!(err, CantonError::ServerError { .. }));
+        }
+
+        #[tokio::test]
+        async fn test_simulate_success() {
+            let mock = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v2/commands/simulate"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "success": true
+                })))
+                .mount(&mock)
+                .await;
+
+            let client = LedgerApiClient::new(&mock.uri(), None);
+            let result = canton_simulate(
+                &test_command(),
+                &["alice::1220abcd".to_string()],
+                &[],
+                &client,
+            )
+            .await
+            .unwrap();
+
+            assert!(result.success);
+            assert!(result.error_message.is_none());
+        }
+
+        #[tokio::test]
+        async fn test_simulate_failure() {
+            let mock = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v2/commands/simulate"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "success": false,
+                    "errorMessage": "contract not active"
+                })))
+                .mount(&mock)
+                .await;
+
+            let client = LedgerApiClient::new(&mock.uri(), None);
+            let result = canton_simulate(
+                &test_command(),
+                &["alice::1220abcd".to_string()],
+                &[],
+                &client,
+            )
+            .await
+            .unwrap();
+
+            assert!(!result.success);
+            assert_eq!(result.error_message.as_deref(), Some("contract not active"));
+        }
+
+        #[tokio::test]
+        async fn test_query_contracts() {
+            let mock = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v2/state/active-contracts"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "activeContracts": [
+                        {
+                            "contractId": "cid-001",
+                            "templateId": "T:T",
+                            "payload": {"key": "value"},
+                            "signatories": ["alice::1220abcd"],
+                            "observers": []
+                        }
+                    ]
+                })))
+                .mount(&mock)
+                .await;
+
+            let client = LedgerApiClient::new(&mock.uri(), None);
+            let contracts =
+                canton_query_contracts("T:T", &["alice::1220abcd".to_string()], &client)
+                    .await
+                    .unwrap();
+
+            assert_eq!(contracts.len(), 1);
+            assert_eq!(contracts[0].contract_id, "cid-001");
+            assert_eq!(contracts[0].template_id, "T:T");
+        }
+
+        #[tokio::test]
+        async fn test_audit_log_written() {
+            let mock = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v2/commands/submit"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "commandId": "cmd-audit",
+                    "completionOffset": "1",
+                    "transactionId": "tx-audit"
+                })))
+                .mount(&mock)
+                .await;
+
+            let (tmpdir, wallet) = make_test_wallet_and_dir().await;
+            let client = LedgerApiClient::new(&mock.uri(), None);
+
+            canton_submit_command(
+                &wallet,
+                PASSPHRASE,
+                &test_command(),
+                &["alice::1220abcd".to_string()],
+                &[],
+                &client,
+                Some(tmpdir.path()),
+            )
+            .await
+            .unwrap();
+
+            let entries = read_audit_log_in(tmpdir.path()).unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].operation, "canton_submit_command");
+            assert_eq!(entries[0].wallet_id, wallet.id);
+            assert!(entries[0].details["command_id"].is_string());
+            assert!(entries[0].details["template_id"].is_string());
+        }
+
+        #[tokio::test]
+        async fn test_audit_log_append() {
+            let mock = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v2/commands/submit"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "commandId": "cmd-x",
+                    "completionOffset": "1",
+                    "transactionId": "tx-x"
+                })))
+                .mount(&mock)
+                .await;
+
+            let (tmpdir, wallet) = make_test_wallet_and_dir().await;
+            let client = LedgerApiClient::new(&mock.uri(), None);
+
+            // Submit twice.
+            canton_submit_command(
+                &wallet,
+                PASSPHRASE,
+                &test_command(),
+                &["alice::1220abcd".to_string()],
+                &[],
+                &client,
+                Some(tmpdir.path()),
+            )
+            .await
+            .unwrap();
+
+            canton_submit_command(
+                &wallet,
+                PASSPHRASE,
+                &test_command(),
+                &["alice::1220abcd".to_string()],
+                &[],
+                &client,
+                Some(tmpdir.path()),
+            )
+            .await
+            .unwrap();
+
+            let entries = read_audit_log_in(tmpdir.path()).unwrap();
+            assert_eq!(entries.len(), 2, "should have 2 audit entries");
+        }
     }
 }
