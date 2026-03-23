@@ -1,0 +1,65 @@
+[package]
+name = "ows-canton"
+version = "0.1.0"
+edition = "2021"
+authors = ["Cayvox Labs <contact@cayvox.com>"]
+license = "MIT"
+description = "Canton Network chain family plugin for Open Wallet Standard"
+repository = "https://github.com/open-wallet-standard/core"
+keywords = ["canton", "wallet", "daml", "blockchain", "ows"]
+categories = ["cryptography", "authentication"]
+
+[dependencies]
+# Cryptography
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+k256 = { version = "0.13", features = ["ecdsa", "sha256"], optional = true }
+rand = "0.8"
+sha2 = "0.10"
+hkdf = "0.12"
+aes-gcm = "0.10"
+scrypt = "0.11"
+zeroize = { version = "1", features = ["derive"] }
+bip39 = "2"
+derivation-path = "0.2"
+slip10_ed25519 = "0.1"
+
+# Key encoding
+pkcs8 = { version = "0.10", features = ["std"] }
+spki = "0.7"
+der = "0.7"
+base64 = "0.22"
+hex = "0.4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Async + HTTP
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+
+# CLI (optional, for binary)
+clap = { version = "4", features = ["derive"], optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+wiremock = "0.6"
+assert_matches = "1"
+test-log = "0.2"
+
+[features]
+default = ["ed25519", "cli"]
+ed25519 = []
+secp256k1 = ["k256"]
+cli = ["clap"]
+integration-tests = []
