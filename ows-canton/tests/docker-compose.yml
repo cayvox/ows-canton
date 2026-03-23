@@ -1,0 +1,14 @@
+services:
+  canton:
+    image: digitalasset/canton-open-source:latest
+    ports:
+      - "7575:7575"   # Ledger API
+      - "7576:7576"   # Admin API
+    volumes:
+      - ./fixtures/canton_sandbox.conf:/canton/config.conf
+    command: ["--config", "/canton/config.conf"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7575/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30

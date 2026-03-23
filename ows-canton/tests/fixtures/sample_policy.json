@@ -1,0 +1,58 @@
+{
+  "id": "tifa-agent-policy",
+  "name": "TIFA Finance Agent Restrictions",
+  "version": 1,
+  "rules": [
+    {
+      "type": "canton_template_allowlist",
+      "templates": [
+        "TIFA.Receivable:Receivable",
+        "TIFA.Payment:Payment",
+        "Daml.Finance.Holding.Fungible:Fungible"
+      ]
+    },
+    {
+      "type": "canton_choice_restriction",
+      "rules": [
+        {
+          "template": "TIFA.Receivable:Receivable",
+          "allowed_choices": ["Settle", "Query"],
+          "denied_choices": ["Archive", "Cancel"]
+        },
+        {
+          "template": "Daml.Finance.Holding.Fungible:Fungible",
+          "allowed_choices": ["Transfer", "Split", "Merge"],
+          "denied_choices": []
+        },
+        {
+          "template": "*",
+          "allowed_choices": [],
+          "denied_choices": ["Archive"]
+        }
+      ]
+    },
+    {
+      "type": "canton_party_scope",
+      "allowed_act_as": ["tifa-agent::1220abcdef0011223344"],
+      "denied_act_as": [],
+      "allowed_read_as": ["*"],
+      "denied_read_as": []
+    },
+    {
+      "type": "canton_simulation_required",
+      "require_simulation": true,
+      "fail_on_simulation_error": true,
+      "max_simulation_latency_ms": 5000
+    },
+    {
+      "type": "canton_synchronizer_restriction",
+      "allowed_synchronizers": ["canton:global", "canton:devnet"],
+      "denied_synchronizers": []
+    },
+    {
+      "type": "canton_command_type_restriction",
+      "allowed_types": ["exercise", "create"],
+      "denied_types": []
+    }
+  ]
+}

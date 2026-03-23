@@ -1,0 +1,49 @@
+{
+  "ows_version": 2,
+  "id": "test-0000-0000-0000-000000000001",
+  "name": "test-wallet",
+  "created_at": "2026-03-23T10:30:00Z",
+  "chain_type": "canton",
+  "accounts": [
+    {
+      "account_id": "canton:sandbox:test-wallet::1220aabbccddeeff00112233445566778899",
+      "address": "test-wallet::1220aabbccddeeff00112233445566778899",
+      "chain_id": "canton:sandbox",
+      "derivation_path": "m/44'/9999'/0'/0/0",
+      "canton": {
+        "party_id": "test-wallet::1220aabbccddeeff00112233445566778899",
+        "key_fingerprint": "1220aabbccddeeff00112233445566778899",
+        "key_format": "DER",
+        "signing_algorithm": "SIGNING_ALGORITHM_SPEC_ED25519",
+        "party_type": "external",
+        "topology_registered": true,
+        "participant_host": "http://localhost:7575",
+        "synchronizer_id": "canton::sandbox-sync"
+      }
+    }
+  ],
+  "crypto": {
+    "cipher": "aes-256-gcm",
+    "cipherparams": {
+      "iv": "000000000000000000000000"
+    },
+    "ciphertext": "0000000000000000000000000000000000000000000000000000000000000000",
+    "auth_tag": "00000000000000000000000000000000",
+    "kdf": "scrypt",
+    "kdfparams": {
+      "dklen": 32,
+      "n": 65536,
+      "r": 8,
+      "p": 1,
+      "salt": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "key_type": "mnemonic",
+  "canton_config": {
+    "default_synchronizer": "canton:sandbox",
+    "participant_url": "http://localhost:7575",
+    "auth_token_path": null,
+    "simulation_required": true
+  },
+  "metadata": {}
+}

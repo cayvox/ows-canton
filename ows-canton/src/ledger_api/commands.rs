@@ -1,7 +1,7 @@
 //! DAML command builder for create, exercise, and other command types.
 //!
 //! Provides helper functions for constructing Canton Ledger API v2
-//! command request bodies from [`CantonCommand`](crate::policy::CantonCommand).
+//! command request bodies from [`CantonCommand`].
 
 use crate::policy::{CantonCommand, CantonCommandType};
 
