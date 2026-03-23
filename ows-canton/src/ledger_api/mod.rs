@@ -9,3 +9,6 @@ pub mod client;
 pub mod commands;
 pub mod topology;
 pub mod types;
+
+pub use client::LedgerApiClient;
+pub use types::*;
