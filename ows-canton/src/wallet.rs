@@ -253,11 +253,10 @@ pub(crate) fn create_canton_wallet_in(
     // Generate mnemonic (24 words = 256-bit entropy).
     let mut rng_entropy = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut rng_entropy);
-    let mnemonic = bip39::Mnemonic::from_entropy(&rng_entropy).map_err(|e| {
-        CantonError::InvalidMnemonic {
+    let mnemonic =
+        bip39::Mnemonic::from_entropy(&rng_entropy).map_err(|e| CantonError::InvalidMnemonic {
             reason: e.to_string(),
-        }
-    })?;
+        })?;
     let entropy = mnemonic.to_entropy();
     let seed = mnemonic.to_seed("");
 
@@ -498,6 +497,28 @@ fn derive_key_scrypt(password: &[u8], salt: &[u8]) -> Result<[u8; 32], CantonErr
         }
     })?;
     Ok(dk)
+}
+
+/// Rewrite a wallet file to disk (used after metadata updates like onboarding).
+pub(crate) fn save_wallet_in(
+    ows_home: &Path,
+    wallet: &CantonWalletFile,
+) -> Result<(), CantonError> {
+    let wallets_dir = ows_home.join("wallets");
+    fs::create_dir_all(&wallets_dir)?;
+
+    let wallet_path = wallets_dir.join(format!("{}.json", wallet.id));
+    let json = serde_json::to_string_pretty(wallet)?;
+    fs::write(&wallet_path, &json)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&wallet_path, perms)?;
+    }
+
+    Ok(())
 }
 
 // ── Validation helpers ─────────────────────────────────────────────
