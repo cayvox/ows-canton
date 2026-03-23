@@ -49,6 +49,7 @@ tracing = "0.1"
 
 # CLI (optional, for binary)
 clap = { version = "4", features = ["derive"], optional = true }
+rpassword = { version = "5", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -61,5 +62,5 @@ test-log = "0.2"
 default = ["ed25519", "cli"]
 ed25519 = []
 secp256k1 = ["k256"]
-cli = ["clap"]
+cli = ["clap", "rpassword"]
 integration-tests = []

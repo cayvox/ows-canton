@@ -5,3 +5,5 @@
 //! See `specs/09-cli-commands.md` for the full specification.
 
 pub mod commands;
+
+pub use commands::{CantonCli, CantonSubcommand};
