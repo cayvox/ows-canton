@@ -1,14 +1,26 @@
+# Canton Sandbox for integration testing.
+#
+# Usage:
+#   docker compose -f tests/docker-compose.yml up -d
+#   cargo test -p ows-canton --features integration-tests
+#   docker compose -f tests/docker-compose.yml down
+#
+# Note: The JSON Ledger API v2 (/v2/...) requires Canton 3.4+.
+# Update the image tag when a Canton 3.4+ image is publicly available.
+
 services:
   canton:
-    image: digitalasset/canton-open-source:latest
+    image: ${CANTON_IMAGE:-digitalasset/canton-open-source:latest}
+    container_name: ows-canton-sandbox
     ports:
       - "7575:7575"   # Ledger API
       - "7576:7576"   # Admin API
     volumes:
-      - ./fixtures/canton_sandbox.conf:/canton/config.conf
-    command: ["--config", "/canton/config.conf"]
+      - ./fixtures/canton_sandbox.conf:/canton/config.conf:ro
+    command: ["daemon", "--auto-connect-local", "-c", "/canton/config.conf"]
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:7575/health"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:7575/health || exit 1"]
       interval: 5s
       timeout: 3s
-      retries: 30
+      retries: 40
+      start_period: 60s
