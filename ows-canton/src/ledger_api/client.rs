@@ -86,18 +86,27 @@ impl LedgerApiClient {
 
     /// Generate topology transactions for an External Party.
     ///
-    /// **Note**: this endpoint (`POST /v2/parties/external/generate-topology`) is
-    /// only available on CN Network nodes (CN Quickstart), not on the standalone
-    /// Canton sandbox.
+    /// Canton 3.4.10 expects the public key as a structured `PublicKeyObject`
+    /// with raw key bytes, not a plain base64 string.
+    ///
+    /// `key_data_base64` should be the base64-encoded **raw** public key bytes
+    /// (32 bytes for Ed25519), not the SPKI-DER encoded form.
     pub async fn generate_external_topology(
         &self,
-        public_key_base64: &str,
+        key_data_base64: &str,
+        key_spec: &str,
         synchronizer: &str,
+        party_hint: &str,
     ) -> Result<GenerateTopologyResponse, CantonError> {
         let url = format!("{}/v2/parties/external/generate-topology", self.base_url);
         let body = GenerateTopologyRequest {
-            public_key: public_key_base64.to_string(),
+            public_key: PublicKeyObject {
+                key_data: key_data_base64.to_string(),
+                format: "CRYPTO_KEY_FORMAT_RAW".to_string(),
+                key_spec: key_spec.to_string(),
+            },
             synchronizer: synchronizer.to_string(),
+            party_hint: party_hint.to_string(),
         };
         self.post_json(&url, &body).await
     }
@@ -454,18 +463,26 @@ mod tests {
             .and(path("/v2/parties/external/generate-topology"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "partyId": "alice::1220abcd",
-                "transactions": ["dHgx", "dHgy"]
+                "publicKeyFingerprint": "1220abcd",
+                "topologyTransactions": ["dHgx", "dHgy"],
+                "multiHash": "EiAAAA=="
             })))
             .mount(&mock)
             .await;
 
         let client = LedgerApiClient::new(&mock.uri(), None);
         let resp = client
-            .generate_external_topology("MCowBQ...", "canton::sync1")
+            .generate_external_topology(
+                "MCowBQ...",
+                "SIGNING_KEY_SPEC_EC_CURVE25519",
+                "canton::sync1",
+                "alice",
+            )
             .await
             .unwrap();
         assert_eq!(resp.party_id, "alice::1220abcd");
-        assert_eq!(resp.transactions.len(), 2);
+        assert_eq!(resp.topology_transactions.len(), 2);
+        assert_eq!(resp.public_key_fingerprint, "1220abcd");
     }
 
     #[tokio::test]
@@ -479,7 +496,12 @@ mod tests {
 
         let client = LedgerApiClient::new(&mock.uri(), None);
         let err = client
-            .generate_external_topology("bad-key", "canton::sync1")
+            .generate_external_topology(
+                "bad-key",
+                "SIGNING_KEY_SPEC_EC_CURVE25519",
+                "canton::sync1",
+                "alice",
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, CantonError::InvalidApiResponse { .. }));
@@ -525,7 +547,10 @@ mod tests {
         let client = LedgerApiClient::new(&mock.uri(), None);
         let req = AllocatePartyRequest {
             synchronizer: "canton::sync1".to_string(),
-            onboarding_transactions: vec!["dHgx".to_string()],
+            onboarding_transactions: vec![SignedTopologyTransaction {
+                transaction: "dHgx".to_string(),
+                signatures: vec![],
+            }],
             multi_hash_signatures: vec![MultiHashSignatureRequest {
                 format: "SIGNATURE_FORMAT_CONCAT".to_string(),
                 signature: "c2ln".to_string(),

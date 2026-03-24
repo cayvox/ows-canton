@@ -30,7 +30,7 @@ pub struct CantonSignature {
     pub signature: String,
     /// Key fingerprint identifying the signing key.
     pub signed_by: String,
-    /// Canton signature format (always `"SIGNATURE_FORMAT_CONCAT"`).
+    /// Canton signature format (e.g. `"SIGNATURE_FORMAT_CONCAT"`).
     pub format: String,
     /// Canton signing algorithm spec string.
     pub algorithm: String,

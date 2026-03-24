@@ -6,7 +6,6 @@
 //! See `specs/06-onboarding.md` for the full specification.
 
 use base64::Engine;
-use sha2::{Digest, Sha256};
 
 use crate::identifier::CantonPartyId;
 use crate::keygen::{ed25519_sign, generate_canton_keypair, CantonKeyPair, CantonSigningAlgorithm};
@@ -44,38 +43,49 @@ pub async fn onboard_external_party(
     client: &LedgerApiClient,
     synchronizer_id: &str,
 ) -> Result<OnboardingResult, CantonError> {
-    // 1. Encode public key as base64 DER.
-    let pubkey_b64 = base64::engine::general_purpose::STANDARD.encode(&keypair.public_key_der);
+    // 1. Encode raw public key as base64 (Canton wants raw bytes, not SPKI-DER).
+    let pubkey_raw_b64 = base64::engine::general_purpose::STANDARD.encode(&keypair.public_key);
+
+    // Determine key spec from signing algorithm.
+    let key_spec = match keypair.signing_algorithm {
+        CantonSigningAlgorithm::Ed25519 => "SIGNING_KEY_SPEC_EC_CURVE25519",
+        CantonSigningAlgorithm::EcDsaSha256 => "SIGNING_KEY_SPEC_EC_SECP256K1",
+    };
 
     // 2. Generate topology transactions.
     let topo_resp = client
-        .generate_external_topology(&pubkey_b64, synchronizer_id)
+        .generate_external_topology(&pubkey_raw_b64, key_spec, synchronizer_id, party_hint)
         .await?;
 
     let party_id_str = topo_resp.party_id.clone();
 
-    // 3. Sign each topology transaction.
-    let mut signatures: Vec<CantonSignature> = Vec::new();
-    for tx_b64 in &topo_resp.transactions {
-        let tx_bytes = base64::engine::general_purpose::STANDARD
-            .decode(tx_b64)
-            .map_err(|e| CantonError::OnboardingFailed {
-                reason: format!("invalid base64 topology transaction: {e}"),
-            })?;
+    // 3. Sign the multiHash (commitment to all topology transactions).
+    //    Canton provides a multiHash in the generate-topology response that
+    //    covers all transactions. We sign it directly with Ed25519.
+    let multi_hash_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&topo_resp.multi_hash)
+        .map_err(|e| CantonError::OnboardingFailed {
+            reason: format!("invalid base64 multiHash: {e}"),
+        })?;
 
-        let hash = Sha256::digest(&tx_bytes);
-        let sig_bytes = ed25519_sign(&keypair.private_key, &hash)?;
+    let sig_bytes = ed25519_sign(&keypair.private_key, &multi_hash_bytes)?;
 
-        signatures.push(CantonSignature {
-            signature: base64::engine::general_purpose::STANDARD.encode(&sig_bytes),
-            signed_by: keypair.fingerprint.clone(),
-            format: "SIGNATURE_FORMAT_CONCAT".to_string(),
-            algorithm: keypair.signing_algorithm.to_string(),
-        });
-    }
+    // Use Canton's publicKeyFingerprint (not our locally-computed one) as signedBy.
+    let signed_by = topo_resp.public_key_fingerprint.clone();
+
+    let signatures = vec![CantonSignature {
+        signature: base64::engine::general_purpose::STANDARD.encode(&sig_bytes),
+        signed_by,
+        format: "SIGNATURE_FORMAT_CONCAT".to_string(),
+        algorithm: keypair.signing_algorithm.to_string(),
+    }];
 
     // 4. Allocate party with signed transactions.
-    let alloc_req = build_allocate_request(synchronizer_id, &topo_resp.transactions, &signatures);
+    let alloc_req = build_allocate_request(
+        synchronizer_id,
+        &topo_resp.topology_transactions,
+        &signatures,
+    );
     client.allocate_external_party(&alloc_req).await?;
 
     // 5. Verify registration.
@@ -180,7 +190,9 @@ mod tests {
             .and(path("/v2/parties/external/generate-topology"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "partyId": "test-wallet::1220aabbccdd",
-                "transactions": ["dHgx", "dHgy"]
+                "publicKeyFingerprint": "1220aabbccdd",
+                "topologyTransactions": ["dHgx", "dHgy"],
+                "multiHash": "EiAAAA=="
             })))
             .mount(mock)
             .await;
@@ -199,8 +211,9 @@ mod tests {
             .and(path("/v2/parties"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "partyDetails": [
-                    { "party": "test-wallet::1220aabbccdd", "isLocal": false, "participantPermissions": [] }
-                ]
+                    { "party": "test-wallet::1220aabbccdd", "isLocal": false, "identityProviderId": "" }
+                ],
+                "nextPageToken": ""
             })))
             .mount(mock)
             .await;
@@ -304,7 +317,9 @@ mod tests {
             .and(path("/v2/parties/external/generate-topology"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "partyId": "dup::1220aabbccdd",
-                "transactions": ["dHgx"]
+                "publicKeyFingerprint": "1220aabbccdd",
+                "topologyTransactions": ["dHgx"],
+                "multiHash": "EiAAAA=="
             })))
             .mount(&mock)
             .await;

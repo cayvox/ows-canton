@@ -9,15 +9,18 @@ use base64::Engine;
 use crate::keygen::CantonSigningAlgorithm;
 use crate::signing::CantonSignature;
 
-use super::types::{AllocatePartyRequest, MultiHashSignatureRequest};
+use super::types::{AllocatePartyRequest, MultiHashSignatureRequest, SignedTopologyTransaction};
 
 /// Build an [`AllocatePartyRequest`] from topology transactions and signatures.
+///
+/// Canton 3.4.10 expects signatures at the **top level** (`multiHashSignatures`),
+/// not nested per-transaction. Transactions are wrapped with empty `signatures`.
 pub fn build_allocate_request(
     synchronizer: &str,
     transactions: &[String],
     signatures: &[CantonSignature],
 ) -> AllocatePartyRequest {
-    let multi_hash_signatures = signatures
+    let multi_hash_signatures: Vec<MultiHashSignatureRequest> = signatures
         .iter()
         .map(|sig| MultiHashSignatureRequest {
             format: sig.format.clone(),
@@ -27,9 +30,17 @@ pub fn build_allocate_request(
         })
         .collect();
 
+    let onboarding_transactions = transactions
+        .iter()
+        .map(|tx| SignedTopologyTransaction {
+            transaction: tx.clone(),
+            signatures: vec![],
+        })
+        .collect();
+
     AllocatePartyRequest {
         synchronizer: synchronizer.to_string(),
-        onboarding_transactions: transactions.to_vec(),
+        onboarding_transactions,
         multi_hash_signatures,
     }
 }
@@ -78,6 +89,12 @@ mod tests {
 
         assert_eq!(req.synchronizer, "canton::sync1");
         assert_eq!(req.onboarding_transactions.len(), 2);
+        // Transactions have empty per-transaction signatures.
+        assert_eq!(req.onboarding_transactions[0].transaction, "dHgx");
+        assert!(req.onboarding_transactions[0].signatures.is_empty());
+        assert_eq!(req.onboarding_transactions[1].transaction, "dHgy");
+        assert!(req.onboarding_transactions[1].signatures.is_empty());
+        // Signatures are at the top level.
         assert_eq!(req.multi_hash_signatures.len(), 1);
         assert_eq!(req.multi_hash_signatures[0].signed_by, "1220abcd");
     }

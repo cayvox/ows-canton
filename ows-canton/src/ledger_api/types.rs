@@ -5,40 +5,108 @@
 
 use serde::{Deserialize, Serialize};
 
-// ── Topology (CN Quickstart / CN Network specific) ─────────────────
+// ── Topology (External Party Registration) ────────────────────────
+
+/// Public key object for `POST /v2/parties/external/generate-topology`.
+///
+/// Canton 3.4.10 expects the public key as a structured object with key data,
+/// format, and key spec — not a plain base64 string.
+///
+/// ```json
+/// {
+///   "keyData": "<base64 raw 32-byte public key>",
+///   "format": "CRYPTO_KEY_FORMAT_RAW",
+///   "keySpec": "SIGNING_KEY_SPEC_EC_CURVE25519"
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicKeyObject {
+    /// Base64-encoded key bytes (raw 32 bytes for Ed25519, not SPKI-DER).
+    pub key_data: String,
+    /// Key format: `CRYPTO_KEY_FORMAT_RAW` or `CRYPTO_KEY_FORMAT_DER`.
+    pub format: String,
+    /// Key spec: `SIGNING_KEY_SPEC_EC_CURVE25519`, `SIGNING_KEY_SPEC_EC_P256`,
+    /// `SIGNING_KEY_SPEC_EC_P384`, `SIGNING_KEY_SPEC_EC_SECP256K1`.
+    pub key_spec: String,
+}
 
 /// Request body for `POST /v2/parties/external/generate-topology`.
 ///
-/// Note: this endpoint is only available on CN Network nodes (CN Quickstart),
-/// not on the standalone Canton sandbox.
+/// Works on both standalone Canton sandbox and CN Network nodes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateTopologyRequest {
-    /// Base64-encoded DER public key (SPKI).
-    pub public_key: String,
+    /// Structured public key object.
+    pub public_key: PublicKeyObject,
     /// Synchronizer identifier.
     pub synchronizer: String,
+    /// Party name hint (becomes the party name prefix).
+    pub party_hint: String,
 }
 
 /// Response from `POST /v2/parties/external/generate-topology`.
+///
+/// ```json
+/// {
+///   "partyId": "owstest42::1220...",
+///   "publicKeyFingerprint": "1220...",
+///   "topologyTransactions": ["<base64>"],
+///   "multiHash": "<base64>"
+/// }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateTopologyResponse {
     /// Generated Canton party identifier.
     pub party_id: String,
+    /// Fingerprint of the public key as computed by Canton.
+    pub public_key_fingerprint: String,
     /// Base64-encoded topology transactions to be signed.
-    pub transactions: Vec<String>,
+    pub topology_transactions: Vec<String>,
+    /// Multi-hash of the topology transactions.
+    #[serde(default)]
+    pub multi_hash: String,
+}
+
+/// A signed topology transaction for `POST /v2/parties/external/allocate`.
+///
+/// Each transaction carries its own array of signatures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedTopologyTransaction {
+    /// Base64-encoded topology transaction bytes.
+    pub transaction: String,
+    /// Signatures for this specific transaction.
+    pub signatures: Vec<MultiHashSignatureRequest>,
 }
 
 /// Request body for `POST /v2/parties/external/allocate`.
+///
+/// Canton 3.4.10 expects:
+/// ```json
+/// {
+///   "synchronizer": "mysynchronizer::1220...",
+///   "onboardingTransactions": [
+///     { "transaction": "<base64>", "signatures": [] }
+///   ],
+///   "multiHashSignatures": [
+///     { "format": "SIGNATURE_FORMAT_CONCAT", "signature": "<base64>", ... }
+///   ]
+/// }
+/// ```
+///
+/// The `multiHashSignatures` are at the **top level**, not per-transaction.
+/// The `multiHash` from `generate-topology` is signed, covering all transactions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AllocatePartyRequest {
     /// Synchronizer identifier.
     pub synchronizer: String,
-    /// Signed topology transactions (base64).
-    pub onboarding_transactions: Vec<String>,
-    /// Signatures for the topology transactions.
+    /// Topology transactions, each wrapped with an empty signatures array.
+    pub onboarding_transactions: Vec<SignedTopologyTransaction>,
+    /// Top-level multi-hash signatures covering all transactions.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub multi_hash_signatures: Vec<MultiHashSignatureRequest>,
 }
 
@@ -50,11 +118,17 @@ pub struct AllocatePartyResponse {
     pub party_id: String,
 }
 
-/// A Canton multi-hash signature object for API requests.
+/// A Canton signature object for API requests.
+///
+/// Supported formats: `SIGNATURE_FORMAT_RAW`, `SIGNATURE_FORMAT_DER`,
+/// `SIGNATURE_FORMAT_CONCAT`, `SIGNATURE_FORMAT_SYMBOLIC`.
+///
+/// Supported algorithms: `SIGNING_ALGORITHM_SPEC_ED25519`,
+/// `SIGNING_ALGORITHM_SPEC_EC_DSA_SHA_256`, `SIGNING_ALGORITHM_SPEC_EC_DSA_SHA_384`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MultiHashSignatureRequest {
-    /// Signature format (e.g. `"SIGNATURE_FORMAT_CONCAT"`).
+    /// Signature format (e.g. `"SIGNATURE_FORMAT_RAW"`).
     pub format: String,
     /// Base64-encoded signature bytes.
     pub signature: String,

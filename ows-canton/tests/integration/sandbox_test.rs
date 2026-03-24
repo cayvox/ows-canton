@@ -26,8 +26,12 @@
 
 use std::time::Duration;
 
+use base64::Engine;
 use ows_canton::keygen::{generate_canton_keypair, CantonSigningAlgorithm};
 use ows_canton::ledger_api::client::LedgerApiClient;
+use ows_canton::ledger_api::types::{
+    AllocatePartyRequest, MultiHashSignatureRequest, SignedTopologyTransaction,
+};
 
 /// Canton sandbox HTTP JSON API endpoint.
 const SANDBOX_URL: &str = "http://localhost:6864";
@@ -230,4 +234,201 @@ async fn test_sandbox_get_completions() {
     );
 
     eprintln!("Got {} completion events from offset 0", completions.len());
+}
+
+// ── Test: External Party — Generate Topology ──────────────────────
+
+#[tokio::test]
+async fn test_sandbox_generate_topology() {
+    let client = sandbox_client();
+    require_sandbox(&client).await;
+
+    // Get synchronizer ID.
+    let syncs = client.get_connected_synchronizers().await.unwrap();
+    let sync_id = &syncs[0].synchronizer_id;
+
+    // Derive an Ed25519 keypair.
+    let kp = test_keypair_at_index(100);
+    let pubkey_raw_b64 = base64::engine::general_purpose::STANDARD.encode(&kp.public_key);
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let party_hint = format!("owstopo{ts}");
+
+    // Call generate-topology.
+    let resp = client
+        .generate_external_topology(
+            &pubkey_raw_b64,
+            "SIGNING_KEY_SPEC_EC_CURVE25519",
+            sync_id,
+            &party_hint,
+        )
+        .await
+        .unwrap();
+
+    eprintln!("Generated topology for party: {}", resp.party_id);
+    eprintln!("Public key fingerprint: {}", resp.public_key_fingerprint);
+    eprintln!(
+        "Topology transactions: {} items",
+        resp.topology_transactions.len()
+    );
+
+    // Verify response fields.
+    assert!(
+        resp.party_id.starts_with(&party_hint),
+        "party_id '{}' should start with hint '{}'",
+        resp.party_id,
+        party_hint
+    );
+    assert!(
+        !resp.public_key_fingerprint.is_empty(),
+        "publicKeyFingerprint should be non-empty"
+    );
+    assert!(
+        resp.public_key_fingerprint.starts_with("1220"),
+        "publicKeyFingerprint should start with '1220'"
+    );
+    assert!(
+        !resp.topology_transactions.is_empty(),
+        "topologyTransactions should have at least one entry"
+    );
+}
+
+// ── Test: External Party — Full Allocate Flow ─────────────────────
+
+#[tokio::test]
+async fn test_sandbox_external_party_allocate() {
+    let client = sandbox_client();
+    require_sandbox(&client).await;
+
+    // Get synchronizer ID.
+    let syncs = client.get_connected_synchronizers().await.unwrap();
+    let sync_id = &syncs[0].synchronizer_id;
+
+    // Use a unique index + timestamp for each test run.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let party_hint = format!("owsalloc{ts}");
+
+    let kp = test_keypair_at_index(200);
+    let pubkey_raw_b64 = base64::engine::general_purpose::STANDARD.encode(&kp.public_key);
+
+    // 1. Generate topology.
+    let topo = client
+        .generate_external_topology(
+            &pubkey_raw_b64,
+            "SIGNING_KEY_SPEC_EC_CURVE25519",
+            sync_id,
+            &party_hint,
+        )
+        .await
+        .unwrap();
+
+    eprintln!("Topology generated for: {}", topo.party_id);
+
+    // 2. Sign the multiHash from the generate-topology response.
+    //    The multiHash is a commitment covering all topology transactions.
+    //    Canton expects Ed25519 signature over the raw multiHash bytes.
+    use ows_canton::keygen::ed25519_sign;
+
+    let multi_hash_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&topo.multi_hash)
+        .unwrap();
+    let sig_bytes = ed25519_sign(&kp.private_key, &multi_hash_bytes).unwrap();
+
+    eprintln!(
+        "multiHash (hex): {}, sig len: {}",
+        hex::encode(&multi_hash_bytes),
+        sig_bytes.len()
+    );
+
+    // Wrap transactions with empty per-transaction signatures.
+    let signed_txs: Vec<SignedTopologyTransaction> = topo
+        .topology_transactions
+        .iter()
+        .map(|tx| SignedTopologyTransaction {
+            transaction: tx.clone(),
+            signatures: vec![],
+        })
+        .collect();
+
+    // 3. Allocate the external party with top-level multiHashSignatures.
+    let alloc_req = AllocatePartyRequest {
+        synchronizer: sync_id.to_string(),
+        onboarding_transactions: signed_txs,
+        multi_hash_signatures: vec![MultiHashSignatureRequest {
+            format: "SIGNATURE_FORMAT_CONCAT".to_string(),
+            signature: base64::engine::general_purpose::STANDARD.encode(&sig_bytes),
+            signed_by: topo.public_key_fingerprint.clone(),
+            signing_algorithm_spec: "SIGNING_ALGORITHM_SPEC_ED25519".to_string(),
+        }],
+    };
+    let alloc_resp = client.allocate_external_party(&alloc_req).await.unwrap();
+
+    eprintln!("Allocated external party: {}", alloc_resp.party_id);
+    assert!(
+        alloc_resp.party_id.starts_with(&party_hint),
+        "allocated party_id '{}' should start with hint '{}'",
+        alloc_resp.party_id,
+        party_hint
+    );
+    assert_eq!(
+        alloc_resp.party_id, topo.party_id,
+        "allocate response party_id should match generate-topology party_id"
+    );
+}
+
+// ── Test: External Party — Allocate Without Signatures (Sandbox) ──
+
+#[tokio::test]
+async fn test_sandbox_external_party_allocate_no_sig() {
+    let client = sandbox_client();
+    require_sandbox(&client).await;
+
+    let syncs = client.get_connected_synchronizers().await.unwrap();
+    let sync_id = &syncs[0].synchronizer_id;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let party_hint = format!("owsnosig{ts}");
+
+    let kp = test_keypair_at_index(300);
+    let pubkey_raw_b64 = base64::engine::general_purpose::STANDARD.encode(&kp.public_key);
+
+    // Generate topology.
+    let topo = client
+        .generate_external_topology(
+            &pubkey_raw_b64,
+            "SIGNING_KEY_SPEC_EC_CURVE25519",
+            sync_id,
+            &party_hint,
+        )
+        .await
+        .unwrap();
+
+    // Allocate with empty signatures (sandbox allows this).
+    let signed_txs: Vec<SignedTopologyTransaction> = topo
+        .topology_transactions
+        .iter()
+        .map(|tx| SignedTopologyTransaction {
+            transaction: tx.clone(),
+            signatures: vec![],
+        })
+        .collect();
+
+    let alloc_req = AllocatePartyRequest {
+        synchronizer: sync_id.to_string(),
+        onboarding_transactions: signed_txs,
+        multi_hash_signatures: vec![],
+    };
+    let alloc_resp = client.allocate_external_party(&alloc_req).await.unwrap();
+
+    eprintln!("Allocated external party (no sig): {}", alloc_resp.party_id);
+    assert_eq!(alloc_resp.party_id, topo.party_id);
 }
