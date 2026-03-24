@@ -459,11 +459,11 @@ async fn handle_parties(args: PartiesArgs) -> Result<(), CantonError> {
         .unwrap_or("canton:global");
 
     println!("Parties on {chain_id}:\n");
-    println!("  {:<40} {:<8} PERMISSIONS", "PARTY ID", "LOCAL");
+    println!("  {:<40} {:<8} IDP", "PARTY ID", "LOCAL");
     for p in &parties {
         println!(
-            "  {:<40} {:<8} {:?}",
-            p.party, p.is_local, p.participant_permissions
+            "  {:<40} {:<8} {}",
+            p.party, p.is_local, p.identity_provider_id
         );
     }
     Ok(())

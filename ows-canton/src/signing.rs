@@ -415,12 +415,14 @@ pub async fn canton_simulate(
 }
 
 /// Query active contracts from the Ledger API.
+///
+/// Queries at the current ledger end (offset 0 means "latest").
 pub async fn canton_query_contracts(
     template_id: &str,
     parties: &[String],
     client: &LedgerApiClient,
 ) -> Result<Vec<ActiveContract>, CantonError> {
-    client.get_active_contracts(template_id, parties).await
+    client.get_active_contracts(template_id, parties, 0).await
 }
 
 #[cfg(test)]
@@ -724,7 +726,7 @@ mod tests {
         async fn test_submit_command_success() {
             let mock = MockServer::start().await;
             Mock::given(method("POST"))
-                .and(path("/v2/commands/submit"))
+                .and(path("/v2/commands/submit-and-wait"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "commandId": "cmd-001",
                     "completionOffset": "42",
@@ -758,7 +760,7 @@ mod tests {
         async fn test_submit_command_failure() {
             let mock = MockServer::start().await;
             Mock::given(method("POST"))
-                .and(path("/v2/commands/submit"))
+                .and(path("/v2/commands/submit-and-wait"))
                 .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
                 .mount(&mock)
                 .await;
@@ -835,19 +837,20 @@ mod tests {
         #[tokio::test]
         async fn test_query_contracts() {
             let mock = MockServer::start().await;
-            Mock::given(method("GET"))
+            // Active contracts uses POST /v2/state/active-contracts in Canton 3.4+
+            Mock::given(method("POST"))
                 .and(path("/v2/state/active-contracts"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "activeContracts": [
-                        {
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "createdEvent": {
                             "contractId": "cid-001",
                             "templateId": "T:T",
                             "payload": {"key": "value"},
                             "signatories": ["alice::1220abcd"],
                             "observers": []
                         }
-                    ]
-                })))
+                    }
+                ])))
                 .mount(&mock)
                 .await;
 
@@ -866,7 +869,7 @@ mod tests {
         async fn test_audit_log_written() {
             let mock = MockServer::start().await;
             Mock::given(method("POST"))
-                .and(path("/v2/commands/submit"))
+                .and(path("/v2/commands/submit-and-wait"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "commandId": "cmd-audit",
                     "completionOffset": "1",
@@ -902,7 +905,7 @@ mod tests {
         async fn test_audit_log_append() {
             let mock = MockServer::start().await;
             Mock::given(method("POST"))
-                .and(path("/v2/commands/submit"))
+                .and(path("/v2/commands/submit-and-wait"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "commandId": "cmd-x",
                     "completionOffset": "1",

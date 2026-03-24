@@ -1,14 +1,16 @@
 //! Request and response types for the Canton Ledger API v2.
 //!
-//! Defines the JSON-serializable types used in Ledger API communication,
-//! including command submission requests, completion responses, party
-//! information, and active contract queries.
+//! Types are derived from the actual Canton 3.4.10 HTTP JSON API responses.
+//! All JSON fields use camelCase per the Canton HTTP API convention.
 
 use serde::{Deserialize, Serialize};
 
-// ── Topology ───────────────────────────────────────────────────────
+// ── Topology (CN Quickstart / CN Network specific) ─────────────────
 
 /// Request body for `POST /v2/parties/external/generate-topology`.
+///
+/// Note: this endpoint is only available on CN Network nodes (CN Quickstart),
+/// not on the standalone Canton sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateTopologyRequest {
@@ -62,9 +64,36 @@ pub struct MultiHashSignatureRequest {
     pub signing_algorithm_spec: String,
 }
 
+// ── Standard Party Allocation ──────────────────────────────────────
+
+/// Request body for `POST /v2/parties` (standard party allocation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AllocatePartyHintRequest {
+    /// Party ID hint (becomes the party name prefix).
+    pub party_id_hint: String,
+    /// Human-readable display name.
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub display_name: String,
+    /// Identity provider ID (empty string for default).
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub identity_provider_id: String,
+}
+
+/// Response from `POST /v2/parties`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AllocatePartyHintResponse {
+    /// Details of the newly allocated party.
+    pub party_details: PartyDetails,
+}
+
 // ── Command Submission ─────────────────────────────────────────────
 
-/// Request body for `POST /v2/commands/submit`.
+/// Request body for `POST /v2/commands/submit-and-wait`.
+///
+/// In sandbox mode (no auth configured), `user_id` can be provided directly
+/// in the request body to identify the submitting user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitCommandRequest {
@@ -75,7 +104,7 @@ pub struct SubmitCommandRequest {
     pub multi_hash_signatures: Vec<MultiHashSignatureRequest>,
 }
 
-/// Response from `POST /v2/commands/submit`.
+/// Response from `POST /v2/commands/submit-and-wait`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitCommandResponse {
@@ -112,30 +141,61 @@ pub struct SimulateCommandResponse {
 
 // ── Parties ────────────────────────────────────────────────────────
 
-/// Party details returned by `GET /v2/parties`.
+/// Local party metadata from `GET /v2/parties`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PartyLocalMetadata {
+    /// Resource version for optimistic concurrency.
+    #[serde(default)]
+    pub resource_version: String,
+    /// Arbitrary key-value annotations.
+    #[serde(default)]
+    pub annotations: serde_json::Value,
+}
+
+/// Party details returned by `GET /v2/parties` and `POST /v2/parties`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartyDetails {
-    /// Canton party identifier.
+    /// Canton party identifier (`name::fingerprint`).
     pub party: String,
     /// Whether the party is local to this participant.
     pub is_local: bool,
-    /// Participant permissions for this party.
+    /// Local metadata (present for local parties).
     #[serde(default)]
-    pub participant_permissions: Vec<serde_json::Value>,
+    pub local_metadata: Option<PartyLocalMetadata>,
+    /// Identity provider ID.
+    #[serde(default)]
+    pub identity_provider_id: String,
 }
 
-/// Wrapper for the parties list response.
+/// Wrapper for the parties list response (`GET /v2/parties`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartiesResponse {
     /// List of party details.
     pub party_details: Vec<PartyDetails>,
+    /// Pagination token for the next page.
+    #[serde(default)]
+    pub next_page_token: String,
 }
 
 // ── Active Contracts ───────────────────────────────────────────────
 
-/// An active contract from `GET /v2/state/active-contracts`.
+/// Request body for `POST /v2/state/active-contracts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveContractsRequest {
+    /// Filter for contracts (by party or template).
+    pub filter: serde_json::Value,
+    /// Include verbose contract payload.
+    #[serde(default)]
+    pub verbose: bool,
+    /// Ledger offset at which to query active contracts (integer).
+    pub active_at_offset: i64,
+}
+
+/// An active contract from `POST /v2/state/active-contracts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActiveContract {
@@ -154,18 +214,33 @@ pub struct ActiveContract {
     pub observers: Vec<String>,
 }
 
-/// Wrapper for the active contracts response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActiveContractsResponse {
-    /// List of active contracts.
-    #[serde(default)]
-    pub active_contracts: Vec<ActiveContract>,
-}
-
 // ── Completions ────────────────────────────────────────────────────
 
-/// A command completion from `GET /v2/completions`.
+/// Request body for `POST /v2/commands/completions`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionsRequest {
+    /// Parties to get completions for.
+    pub parties: Vec<String>,
+    /// Starting offset (exclusive), as an integer ledger offset.
+    pub begin_exclusive: i64,
+    /// User ID (for sandbox no-auth mode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+}
+
+/// A command completion from `POST /v2/commands/completions`.
+///
+/// The response is a JSON array of completion response objects.
+/// Each element has a `completionResponse` discriminated union.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionWrapper {
+    /// The completion response (discriminated union).
+    pub completion_response: serde_json::Value,
+}
+
+/// A command completion entry (extracted from CompletionWrapper).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Completion {
@@ -181,25 +256,19 @@ pub struct Completion {
     pub transaction_id: Option<String>,
 }
 
-/// Wrapper for the completions response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompletionsResponse {
-    /// List of completions.
-    #[serde(default)]
-    pub completions: Vec<Completion>,
-}
-
 // ── Synchronizers ──────────────────────────────────────────────────
 
 /// A connected synchronizer from `GET /v2/state/connected-synchronizers`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectedSynchronizer {
-    /// Full synchronizer identifier.
+    /// Full synchronizer identifier (`alias::fingerprint`).
     pub synchronizer_id: String,
-    /// Human-readable alias.
-    pub alias: String,
+    /// Human-readable synchronizer alias.
+    pub synchronizer_alias: String,
+    /// Participant permission on this synchronizer.
+    #[serde(default)]
+    pub permission: String,
 }
 
 /// Wrapper for connected synchronizers response.
@@ -208,4 +277,22 @@ pub struct ConnectedSynchronizer {
 pub struct ConnectedSynchronizersResponse {
     /// List of connected synchronizers.
     pub connected_synchronizers: Vec<ConnectedSynchronizer>,
+}
+
+// ── Ledger API Error ───────────────────────────────────────────────
+
+/// Error response body from the Canton Ledger API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerApiError {
+    /// Canton error code.
+    pub code: String,
+    /// Human-readable error cause.
+    pub cause: String,
+    /// Correlation ID (if provided in request).
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    /// Trace ID for distributed tracing.
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }

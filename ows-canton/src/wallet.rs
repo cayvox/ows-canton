@@ -237,7 +237,7 @@ pub fn list_canton_wallets() -> Result<Vec<CantonWalletFile>, CantonError> {
 // ── Internal API (pub(crate) for testing) ──────────────────────────
 
 /// Create a wallet in the given base directory.
-pub(crate) fn create_canton_wallet_in(
+pub fn create_canton_wallet_in(
     ows_home: &Path,
     name: &str,
     passphrase: &str,
@@ -326,7 +326,7 @@ pub(crate) fn create_canton_wallet_in(
 }
 
 /// Load a wallet from the given base directory.
-pub(crate) fn load_canton_wallet_in(
+pub fn load_canton_wallet_in(
     ows_home: &Path,
     wallet_id_or_name: &str,
 ) -> Result<CantonWalletFile, CantonError> {
@@ -364,7 +364,7 @@ pub(crate) fn load_canton_wallet_in(
 }
 
 /// List Canton wallets from the given base directory.
-pub(crate) fn list_canton_wallets_in(
+pub fn list_canton_wallets_in(
     ows_home: &Path,
 ) -> Result<Vec<CantonWalletFile>, CantonError> {
     let wallets_dir = ows_home.join("wallets");

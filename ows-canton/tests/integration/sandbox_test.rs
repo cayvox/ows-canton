@@ -1,16 +1,25 @@
 //! Integration tests against a live Canton Sandbox.
 //!
-//! These tests require a Canton participant node with the JSON Ledger API v2
-//! (Canton 3.4+) running at `http://localhost:7575`.
+//! These tests require a Canton participant node with the HTTP JSON Ledger API v2
+//! (Canton 3.4+) running at `http://localhost:6864`.
 //!
-//! Run with:
-//! ```bash
-//! cargo test -p ows-canton --features integration-tests -- --test-threads=1
-//! ```
+//! The Canton sandbox exposes:
+//! - HTTP JSON API (Ledger API v2) on port 6864
+//! - gRPC Ledger API on port 6865
 //!
-//! Or use the helper script:
+//! Start the sandbox with:
 //! ```bash
 //! ./scripts/run-sandbox-tests.sh
+//! ```
+//!
+//! Or manually:
+//! ```bash
+//! java -jar ~/.daml/sdk/3.4.10/canton/canton.jar sandbox --no-tty
+//! ```
+//!
+//! Then run tests:
+//! ```bash
+//! cargo test -p ows-canton --features integration-tests -- --test-threads=1
 //! ```
 
 #![cfg(feature = "integration-tests")]
@@ -19,12 +28,11 @@ use std::time::Duration;
 
 use ows_canton::keygen::{generate_canton_keypair, CantonSigningAlgorithm};
 use ows_canton::ledger_api::client::LedgerApiClient;
-use ows_canton::ledger_api::types::{MultiHashSignatureRequest, SubmitCommandRequest};
-use ows_canton::onboarding::onboard_external_party;
-use ows_canton::policy::{CantonCommand, CantonCommandType};
-use ows_canton::signing::build_submission_request;
 
-const SANDBOX_URL: &str = "http://localhost:7575";
+/// Canton sandbox HTTP JSON API endpoint.
+const SANDBOX_URL: &str = "http://localhost:6864";
+
+/// Test mnemonic for deterministic keypair generation.
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
@@ -34,39 +42,43 @@ fn sandbox_client() -> LedgerApiClient {
 }
 
 /// Derive a deterministic keypair from the test mnemonic at a given index.
-fn test_keypair_at_index(
-    index: u32,
-) -> ows_canton::keygen::CantonKeyPair {
+fn test_keypair_at_index(index: u32) -> ows_canton::keygen::CantonKeyPair {
     let mnemonic = bip39::Mnemonic::parse(TEST_MNEMONIC).unwrap();
     let seed = mnemonic.to_seed("");
     let path = format!("m/44'/9999'/0'/0/{index}");
     generate_canton_keypair(&seed, &path, CantonSigningAlgorithm::Ed25519).unwrap()
 }
 
-/// Skip the test with a message if the sandbox is not reachable.
+/// Skip the test if the sandbox is not reachable.
 async fn require_sandbox(client: &LedgerApiClient) {
     let healthy = client.health_check().await.unwrap_or(false);
     if !healthy {
         eprintln!("SKIP: Canton Sandbox not available at {SANDBOX_URL}");
         eprintln!("      Start it with: ./scripts/run-sandbox-tests.sh");
-        // We panic with a clear message rather than silently passing.
-        // In CI this ensures the test is noticed as failing when sandbox is expected.
         panic!("Canton Sandbox not available — skipping integration test");
     }
 }
 
-// ── Test: Health Check + Connected Synchronizers ───────────────────
+// ── Test: Version ───────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_sandbox_health_and_synchronizers() {
+async fn test_sandbox_version() {
     let client = sandbox_client();
     require_sandbox(&client).await;
 
-    // Health check.
+    // The health_check calls GET /v2/version — verify it succeeds.
     let healthy = client.health_check().await.unwrap();
-    assert!(healthy, "sandbox should be healthy");
+    assert!(healthy, "sandbox should respond to /v2/version");
+    eprintln!("Canton sandbox is live at {SANDBOX_URL}");
+}
 
-    // Get connected synchronizers.
+// ── Test: Connected Synchronizers ──────────────────────────────────
+
+#[tokio::test]
+async fn test_sandbox_connected_synchronizers() {
+    let client = sandbox_client();
+    require_sandbox(&client).await;
+
     let syncs = client.get_connected_synchronizers().await.unwrap();
     assert!(
         !syncs.is_empty(),
@@ -75,165 +87,147 @@ async fn test_sandbox_health_and_synchronizers() {
 
     eprintln!("Connected synchronizers:");
     for s in &syncs {
-        eprintln!("  {} (alias: {})", s.synchronizer_id, s.alias);
+        eprintln!(
+            "  {} (alias: {}, permission: {})",
+            s.synchronizer_id, s.synchronizer_alias, s.permission
+        );
     }
+
+    // Verify field names match the real API format.
+    let first = &syncs[0];
+    assert!(
+        !first.synchronizer_id.is_empty(),
+        "synchronizerId should be non-empty"
+    );
+    assert!(
+        !first.synchronizer_alias.is_empty(),
+        "synchronizerAlias should be non-empty"
+    );
 }
 
-// ── Test: Full External Party Onboarding ───────────────────────────
+// ── Test: List Parties ──────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_full_external_party_onboarding_against_sandbox() {
+async fn test_sandbox_list_parties() {
     let client = sandbox_client();
     require_sandbox(&client).await;
 
-    // 1. Get a synchronizer to register on.
-    let syncs = client.get_connected_synchronizers().await.unwrap();
-    assert!(!syncs.is_empty(), "need at least one synchronizer");
-    let sync_id = &syncs[0].synchronizer_id;
-    eprintln!("Using synchronizer: {sync_id}");
+    let parties = client.list_parties(None).await.unwrap();
+    assert!(
+        !parties.is_empty(),
+        "sandbox should have at least one party (the default sandbox party)"
+    );
 
-    // 2. Generate a fresh keypair (use index based on timestamp to avoid collisions).
-    let index = (std::time::SystemTime::now()
+    eprintln!("Parties on sandbox:");
+    for p in &parties {
+        eprintln!("  {} (local: {})", p.party, p.is_local);
+    }
+
+    // The default sandbox party has the name "sandbox".
+    let has_sandbox_party = parties.iter().any(|p| p.party.starts_with("sandbox::"));
+    assert!(
+        has_sandbox_party,
+        "expected a 'sandbox::...' party on the Canton sandbox"
+    );
+}
+
+// ── Test: Allocate Party ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_sandbox_allocate_party() {
+    let client = sandbox_client();
+    require_sandbox(&client).await;
+
+    // Use a timestamp-based name to avoid collisions.
+    let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs()
-        % 100_000) as u32;
-    let keypair = test_keypair_at_index(index);
-    eprintln!("Key fingerprint: {}", keypair.fingerprint);
+        .as_millis();
+    let party_hint = format!("testalloc{ts}");
 
-    // 3. Onboard as External Party.
-    let party_hint = format!("inttest{index}");
-    let result = onboard_external_party(&keypair, &party_hint, &client, sync_id)
+    let party = client
+        .allocate_party(&party_hint, "Integration Test Party")
         .await
         .unwrap();
 
-    assert!(result.topology_registered);
-    eprintln!("External party registered on Canton Sandbox:");
-    eprintln!("  Party ID:     {}", result.party_id);
-    eprintln!("  Synchronizer: {}", result.synchronizer_id);
-    eprintln!("  Fingerprint:  {}", result.fingerprint);
+    eprintln!("Allocated party: {}", party.party);
+    assert!(
+        party.party.starts_with(&party_hint),
+        "allocated party '{}' should start with hint '{}'",
+        party.party,
+        party_hint
+    );
+    assert!(party.is_local, "newly allocated party should be local");
 
-    // 4. Verify via list_parties.
-    let parties = client.list_parties(Some(&party_hint)).await.unwrap();
-    let found = parties
-        .iter()
-        .any(|p| p.party == result.party_id.to_string());
+    // Verify it appears in the party list.
+    let parties = client.list_parties(None).await.unwrap();
+    let found = parties.iter().any(|p| p.party == party.party);
     assert!(
         found,
-        "registered party should appear in party list: looked for '{}' in {:?}",
-        result.party_id,
-        parties.iter().map(|p| &p.party).collect::<Vec<_>>()
+        "allocated party '{}' should appear in party list",
+        party.party
     );
     eprintln!("Party verified in party list");
 }
 
-// ── Test: Submit Command Against Sandbox ───────────────────────────
+// ── Test: Keypair and Fingerprint ───────────────────────────────────
 
-/// This test attempts to submit a DAML create command against the sandbox.
-///
-/// Canton requires a deployed DAML model (DAR) to accept create commands.
-/// On a bare sandbox without a DAR, the submit will fail with a template-not-found
-/// error — but this validates that our signing payload format is accepted by
-/// Canton's protocol layer (the error comes after signature verification).
 #[tokio::test]
-async fn test_submit_command_against_sandbox() {
+async fn test_sandbox_keypair_derivation() {
     let client = sandbox_client();
     require_sandbox(&client).await;
 
-    // 1. Get synchronizer + onboard a party first.
-    let syncs = client.get_connected_synchronizers().await.unwrap();
-    assert!(!syncs.is_empty());
-    let sync_id = &syncs[0].synchronizer_id;
+    // Verify deterministic keypair derivation works.
+    let kp1 = test_keypair_at_index(0);
+    let kp2 = test_keypair_at_index(0);
+    let kp3 = test_keypair_at_index(1);
 
-    let index = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        % 100_000 + 50_000) as u32; // offset to avoid collision with onboarding test
-    let keypair = test_keypair_at_index(index);
-    let party_hint = format!("submit{index}");
-
-    let onboard_result = onboard_external_party(&keypair, &party_hint, &client, sync_id)
-        .await
-        .unwrap();
-
-    let party_id = onboard_result.party_id.to_string();
-    eprintln!("Party for submit test: {party_id}");
-
-    // 2. Build a create command.
-    //    We use a fake template that won't exist on the sandbox.
-    //    The goal is to verify our signing format is accepted by Canton.
-    let command = CantonCommand {
-        template_id: "OWSTest.Ping:Ping".to_string(),
-        command_type: CantonCommandType::Create,
-        choice: None,
-        contract_id: None,
-        arguments: serde_json::json!({
-            "sender": party_id,
-            "receiver": party_id,
-            "message": "hello from ows-canton integration test"
-        }),
-    };
-
-    let command_id = uuid::Uuid::new_v4().to_string();
-    let submission = build_submission_request(
-        &command,
-        &[party_id.clone()],
-        &[],
-        &command_id,
+    assert_eq!(
+        kp1.fingerprint, kp2.fingerprint,
+        "same index should give same fingerprint"
+    );
+    assert_ne!(
+        kp1.fingerprint, kp3.fingerprint,
+        "different index should give different fingerprint"
     );
 
-    // 3. Sign the submission payload.
-    use base64::Engine;
-    use sha2::Digest;
+    eprintln!("Keypair index 0 fingerprint: {}", kp1.fingerprint);
+    eprintln!("Keypair index 1 fingerprint: {}", kp3.fingerprint);
 
-    let payload_bytes = serde_json::to_vec(&submission).unwrap();
-    let payload_hash = sha2::Sha256::digest(&payload_bytes);
-    let sig_bytes =
-        ows_canton::keygen::ed25519_sign(&keypair.private_key, &payload_hash).unwrap();
+    // Verify fingerprint format: "1220" + hex
+    assert!(
+        kp1.fingerprint.starts_with("1220"),
+        "fingerprint should start with '1220'"
+    );
+    assert_eq!(
+        kp1.fingerprint.len(),
+        40,
+        "fingerprint should be 40 hex chars (1220 + 36)"
+    );
+}
 
-    let sig_request = MultiHashSignatureRequest {
-        format: "SIGNATURE_FORMAT_CONCAT".to_string(),
-        signature: base64::engine::general_purpose::STANDARD.encode(&sig_bytes),
-        signed_by: keypair.fingerprint.clone(),
-        signing_algorithm_spec: "SIGNING_ALGORITHM_SPEC_ED25519".to_string(),
-    };
+// ── Test: Get Completions ───────────────────────────────────────────
 
-    // 4. Submit.
-    let submit_req = SubmitCommandRequest {
-        commands: submission,
-        multi_hash_signatures: vec![sig_request],
-    };
+#[tokio::test]
+async fn test_sandbox_get_completions() {
+    let client = sandbox_client();
+    require_sandbox(&client).await;
 
-    let result = client.submit_command(&submit_req).await;
+    let parties = client.list_parties(None).await.unwrap();
+    assert!(!parties.is_empty());
 
-    // We expect either:
-    // - Success (if somehow a matching template exists)
-    // - An error from Canton (template not found, invalid payload, etc.)
-    //
-    // What matters is that Canton ACCEPTED the HTTP request and parsed
-    // our signature format. A "template not found" error proves the signing
-    // payload format is correct — Canton validated the signature before
-    // trying to interpret the command.
-    match &result {
-        Ok(resp) => {
-            eprintln!("Submit succeeded (unexpected on bare sandbox):");
-            eprintln!("  Command ID:     {}", resp.command_id);
-            eprintln!("  Transaction ID: {:?}", resp.transaction_id);
-        }
-        Err(e) => {
-            let err_str = format!("{e:?}");
-            eprintln!("Submit returned error (expected on bare sandbox): {e}");
+    let party_ids: Vec<String> = parties.iter().map(|p| p.party.clone()).collect();
 
-            // If we get a "signature verification failed" error, our payload
-            // format is wrong and we need to fix signing.rs.
-            let is_sig_error = err_str.to_lowercase().contains("signature")
-                && err_str.to_lowercase().contains("verif");
-            assert!(
-                !is_sig_error,
-                "CRITICAL: Canton rejected our signature format. \
-                 The signing payload needs to be fixed. Error: {e}"
-            );
-        }
-    }
+    // Get completions from offset 0 — should include an OffsetCheckpoint event.
+    // Use "participant_admin" as userId (required by Canton, even without auth).
+    let completions = client.get_completions(0, &party_ids, "participant_admin").await.unwrap();
+    assert!(
+        !completions.is_empty(),
+        "completions from offset 0 should include at least one OffsetCheckpoint"
+    );
+
+    eprintln!(
+        "Got {} completion events from offset 0",
+        completions.len()
+    );
 }

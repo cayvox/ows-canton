@@ -3,92 +3,133 @@ set -euo pipefail
 
 # ── Canton Sandbox Integration Test Runner ──────────────────────────
 #
-# Starts a Canton Sandbox in Docker, waits for it to be ready,
-# runs the integration tests, then tears down the container.
+# Starts the Canton Sandbox using the DAML SDK, waits for it to be ready,
+# runs the integration tests, then shuts down the sandbox.
 #
 # Usage:
 #   ./scripts/run-sandbox-tests.sh
 #
 # Requirements:
-#   - Docker
-#   - Canton 3.4+ image (JSON Ledger API v2)
-#     Set CANTON_IMAGE to override the default image.
+#   - Java 17+ (set JAVA_HOME if needed)
+#   - DAML SDK 3.4+ with Canton jar
+#     Default: ~/.daml/sdk/3.4.10/canton/canton.jar
+#     Override: CANTON_JAR=/path/to/canton.jar
 #
-# Note: Canton 2.x (digitalasset/canton-open-source:latest) uses gRPC
-# only. The JSON API v2 endpoints (/v2/...) require Canton 3.4+.
-# When a public Canton 3.4+ Docker image becomes available, update
-# CANTON_IMAGE below.
+# The Canton sandbox HTTP JSON API (Ledger API v2) runs on port 6864.
+# Integration tests connect to http://localhost:6864.
 
-CANTON_IMAGE="${CANTON_IMAGE:-digitalasset/canton-open-source:latest}"
-CONTAINER_NAME="ows-canton-sandbox-test"
-LEDGER_PORT=7575
-ADMIN_PORT=7576
-CONFIG_PATH="$(cd "$(dirname "$0")/.." && pwd)/ows-canton/tests/fixtures/canton_sandbox.conf"
-MAX_WAIT_SECONDS=120
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Canton jar location
+CANTON_JAR="${CANTON_JAR:-$HOME/.daml/sdk/3.4.10/canton/canton.jar}"
+JSON_API_PORT="${JSON_API_PORT:-6864}"
+GRPC_API_PORT="${GRPC_API_PORT:-6865}"
+MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-60}"
+SANDBOX_PID=""
+
+# Java home detection
+if [ -z "${JAVA_HOME:-}" ]; then
+    # Try common locations
+    for dir in \
+        "$HOME/sdk/java/jdk-17.0.18+8/Contents/Home" \
+        "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home" \
+        "/usr/lib/jvm/java-17-openjdk-amd64"; do
+        if [ -d "$dir" ]; then
+            export JAVA_HOME="$dir"
+            break
+        fi
+    done
+fi
+
+if [ -n "${JAVA_HOME:-}" ]; then
+    export PATH="$JAVA_HOME/bin:$PATH"
+fi
 
 cleanup() {
-    echo "Stopping Canton Sandbox..."
-    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+    if [ -n "$SANDBOX_PID" ] && kill -0 "$SANDBOX_PID" 2>/dev/null; then
+        echo ""
+        echo "Stopping Canton Sandbox (PID $SANDBOX_PID)..."
+        kill "$SANDBOX_PID" 2>/dev/null || true
+        wait "$SANDBOX_PID" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
 echo "=== OWS Canton Integration Tests ==="
-echo "Image:  $CANTON_IMAGE"
-echo "Config: $CONFIG_PATH"
+echo "Canton jar:    $CANTON_JAR"
+echo "JSON API port: $JSON_API_PORT"
 echo ""
 
-# ── 1. Start Canton Sandbox ─────────────────────────────────────────
+# ── 0. Verify requirements ──────────────────────────────────────────
 
-echo "Starting Canton Sandbox..."
-docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-docker run -d \
-    --name "$CONTAINER_NAME" \
-    -p "${LEDGER_PORT}:${LEDGER_PORT}" \
-    -p "${ADMIN_PORT}:${ADMIN_PORT}" \
-    -v "${CONFIG_PATH}:/canton/config.conf:ro" \
-    "$CANTON_IMAGE" \
-    daemon --auto-connect-local -c /canton/config.conf
-
-# ── 2. Wait for Canton to be ready ──────────────────────────────────
-
-echo "Waiting for Canton Sandbox to be ready..."
-elapsed=0
-while [ "$elapsed" -lt "$MAX_WAIT_SECONDS" ]; do
-    # Try JSON API health endpoint (Canton 3.4+)
-    if curl -sf "http://localhost:${LEDGER_PORT}/health" >/dev/null 2>&1; then
-        echo "Canton Sandbox ready (JSON API) after ${elapsed}s"
-        break
-    fi
-
-    # Try gRPC health via HTTP/2 (Canton 2.x)
-    if curl -sf --http2-prior-knowledge "http://localhost:${LEDGER_PORT}/" >/dev/null 2>&1; then
-        echo ""
-        echo "WARNING: Canton is responding with gRPC (Canton 2.x detected)."
-        echo "         The JSON Ledger API v2 requires Canton 3.4+."
-        echo "         Integration tests targeting /v2/... endpoints will fail."
-        echo "         Set CANTON_IMAGE to a Canton 3.4+ image and retry."
-        echo ""
-        break
-    fi
-
-    sleep 3
-    elapsed=$((elapsed + 3))
-done
-
-if [ "$elapsed" -ge "$MAX_WAIT_SECONDS" ]; then
-    echo "TIMEOUT: Canton did not start within ${MAX_WAIT_SECONDS}s"
-    echo "Container logs:"
-    docker logs "$CONTAINER_NAME" 2>&1 | tail -30
+if ! command -v java >/dev/null 2>&1; then
+    echo "ERROR: Java not found. Set JAVA_HOME or install Java 17+."
     exit 1
 fi
 
+if [ ! -f "$CANTON_JAR" ]; then
+    echo "ERROR: Canton jar not found at $CANTON_JAR"
+    echo "       Install DAML SDK 3.4+ or set CANTON_JAR=/path/to/canton.jar"
+    exit 1
+fi
+
+# ── 1. Start Canton Sandbox ─────────────────────────────────────────
+
+# Check if something is already running on the port
+if curl -sf "http://localhost:${JSON_API_PORT}/v2/version" >/dev/null 2>&1; then
+    echo "Canton Sandbox already running on port ${JSON_API_PORT} — skipping start"
+    SANDBOX_PID=""
+else
+    echo "Starting Canton Sandbox..."
+    java -jar "$CANTON_JAR" sandbox \
+        --json-api-port "$JSON_API_PORT" \
+        --ledger-api-port "$GRPC_API_PORT" \
+        --no-tty \
+        > /tmp/canton_sandbox_test.log 2>&1 &
+    SANDBOX_PID=$!
+    echo "Canton Sandbox PID: $SANDBOX_PID"
+fi
+
+# ── 2. Wait for Canton to be ready ──────────────────────────────────
+
+echo "Waiting for Canton Sandbox to be ready on port ${JSON_API_PORT}..."
+elapsed=0
+while [ "$elapsed" -lt "$MAX_WAIT_SECONDS" ]; do
+    if curl -sf "http://localhost:${JSON_API_PORT}/v2/version" >/dev/null 2>&1; then
+        echo "Canton Sandbox ready after ${elapsed}s"
+        break
+    fi
+
+    # Check if canton process died
+    if [ -n "$SANDBOX_PID" ] && ! kill -0 "$SANDBOX_PID" 2>/dev/null; then
+        echo "ERROR: Canton Sandbox process died. Last log output:"
+        tail -30 /tmp/canton_sandbox_test.log 2>/dev/null || true
+        exit 1
+    fi
+
+    sleep 2
+    elapsed=$((elapsed + 2))
+done
+
+if [ "$elapsed" -ge "$MAX_WAIT_SECONDS" ]; then
+    echo "TIMEOUT: Canton Sandbox did not start within ${MAX_WAIT_SECONDS}s"
+    echo "Log output:"
+    tail -30 /tmp/canton_sandbox_test.log 2>/dev/null || true
+    exit 1
+fi
+
+# Confirm the API is responding correctly
+VERSION=$(curl -s "http://localhost:${JSON_API_PORT}/v2/version" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version', 'unknown'))" 2>/dev/null || echo "unknown")
+echo "Canton version: $VERSION"
+echo ""
+
 # ── 3. Run integration tests ───────────────────────────────────────
 
-echo ""
 echo "Running integration tests..."
 echo ""
 
-cd "$(dirname "$0")/.."
+cd "$REPO_ROOT"
 cargo test -p ows-canton --features integration-tests -- --test-threads=1 2>&1
 TEST_EXIT=$?
 
