@@ -96,5 +96,8 @@ fn test_policy_evaluation_flow() {
         ..ctx
     };
     let denied_result = evaluate_canton_policy(&policy, &denied_ctx);
-    assert!(denied_result.is_deny(), "expected Deny, got: {denied_result:?}");
+    assert!(
+        denied_result.is_deny(),
+        "expected Deny, got: {denied_result:?}"
+    );
 }

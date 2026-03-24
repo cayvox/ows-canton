@@ -220,14 +220,14 @@ async fn test_sandbox_get_completions() {
 
     // Get completions from offset 0 — should include an OffsetCheckpoint event.
     // Use "participant_admin" as userId (required by Canton, even without auth).
-    let completions = client.get_completions(0, &party_ids, "participant_admin").await.unwrap();
+    let completions = client
+        .get_completions(0, &party_ids, "participant_admin")
+        .await
+        .unwrap();
     assert!(
         !completions.is_empty(),
         "completions from offset 0 should include at least one OffsetCheckpoint"
     );
 
-    eprintln!(
-        "Got {} completion events from offset 0",
-        completions.len()
-    );
+    eprintln!("Got {} completion events from offset 0", completions.len());
 }

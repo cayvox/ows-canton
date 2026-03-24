@@ -26,13 +26,17 @@ jobs:
           workspaces: ows-canton
 
       - name: Format check
-        run: cargo fmt -p ows-canton -- --check
+        working-directory: ows-canton
+        run: cargo fmt -- --check
 
       - name: Clippy
-        run: cargo clippy -p ows-canton -- -D warnings
+        working-directory: ows-canton
+        run: cargo clippy -- -D warnings
 
       - name: Tests
-        run: cargo test -p ows-canton
+        working-directory: ows-canton
+        run: cargo test
 
       - name: Doc build
-        run: cargo doc -p ows-canton --no-deps
+        working-directory: ows-canton
+        run: cargo doc --no-deps

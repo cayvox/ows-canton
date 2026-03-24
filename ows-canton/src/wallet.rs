@@ -364,9 +364,7 @@ pub fn load_canton_wallet_in(
 }
 
 /// List Canton wallets from the given base directory.
-pub fn list_canton_wallets_in(
-    ows_home: &Path,
-) -> Result<Vec<CantonWalletFile>, CantonError> {
+pub fn list_canton_wallets_in(ows_home: &Path) -> Result<Vec<CantonWalletFile>, CantonError> {
     let wallets_dir = ows_home.join("wallets");
     if !wallets_dir.is_dir() {
         return Ok(Vec::new());
