@@ -2,6 +2,7 @@
 
 **Canton Network chain family plugin for the [Open Wallet Standard](https://openwallet.sh).**
 
+[![crates.io](https://img.shields.io/crates/v/ows-canton.svg)](https://crates.io/crates/ows-canton)
 [![CI](https://github.com/cayvox/ows-canton/actions/workflows/ci.yml/badge.svg)](https://github.com/cayvox/ows-canton/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
