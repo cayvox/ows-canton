@@ -1,6 +1,6 @@
 [package]
 name = "ows-canton"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Cayvox Labs <contact@cayvox.com>"]
 license = "MIT"
@@ -8,6 +8,7 @@ description = "Canton Network chain family plugin for Open Wallet Standard"
 repository = "https://github.com/cayvox/ows-canton"
 keywords = ["canton", "wallet", "daml", "blockchain", "ows"]
 categories = ["cryptography", "authentication"]
+readme = "../README.md"
 
 [dependencies]
 # Cryptography
